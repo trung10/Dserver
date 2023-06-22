@@ -1,3 +1,4 @@
+import queue
 import threading
 import struct
 import time
@@ -11,45 +12,13 @@ from twisted.python import failure
 
 import server.PyNvCodec as nvc
 
-class AbortThread(Exception):
-    pass
-
-
-class DataProvider:
-    def __init__(self):
-        self.buffer = bytearray()
-        self.lock = threading.Lock()
-        self.isOpen = True
-
-    def push(self, data):
-        self.lock.acquire()
-        self.buffer.extend(data)
-        self.lock.release()
-
-    def read(self, size):
-        data = []
-        while len(data) == 0 and self.isOpen:
-            self.lock.acquire()
-            length = min(len(self.buffer), size)
-            data = bytes(self.buffer[:length])
-            self.buffer = self.buffer[length:]
-            self.lock.release()
-            time.sleep(0.005)
-
-        if not self.isOpen:
-            raise AbortThread
-        return data
-
-    def close(self):
-        self.isOpen = False
-
 
 class PushProtocol(protocol.Protocol):
     MAX_LENGTH = 1024 * 1024  # 最大 1M
 
-    def __init__(self, provider: DataProvider,connections):
+    def __init__(self, q, connections):
         self.buffer = bytearray()
-        self.provider = provider
+        self.queue = q
         self.pushConnection = connections
         self.pushType = 0  # 0: 电脑端, 1: 手机端
 
@@ -89,8 +58,9 @@ class PushProtocol(protocol.Protocol):
 
     def frameReceived(self, data):
         # print("dataReceived", len(data))
-        self.provider.push(data)
-        # self.transport.write(data)
+        frames = nvc.decode(data)
+        for frame in frames:
+            self.queue.put(frame)
 
     def validateLength(self, length):
         if length > self.MAX_LENGTH:
@@ -111,17 +81,18 @@ class PushProtocol(protocol.Protocol):
 
 
 class PushFactory(protocol.Factory):
-    def __init__(self, provider: DataProvider):
-        self.provider = provider
+    def __init__(self):
+        self.queue = queue.Queue()
         self.pushConnection = []
 
     def buildProtocol(self, addr):
-        return PushProtocol(self.provider, self.pushConnection)
+        self.queue = queue.Queue()
+        return PushProtocol(self.queue, self.pushConnection)
 
 
 class PushServer:
-    def __init__(self, provider: DataProvider):
-        self.provider = provider
+    def __init__(self):
+        self.factory = PushFactory()
         self.thread = None
 
     def start(self):
@@ -134,60 +105,11 @@ class PushServer:
         self.thread.join()
         print("PushServer stop")
 
+    def queue(self):
+        return self.factory.queue
+
     def start_twisted(self):
-        reactor.listenTCP(8020, PushFactory(self.provider))
+        nvc.init(1280,720)
+        reactor.listenTCP(8020, self.factory)
         reactor.run(installSignalHandlers=False)
-
-
-class PushDecoder:
-    def __init__(self, provider: DataProvider):
-        self.provider = provider
-        self.thread = None
-        self.bufferFrame = None
-        self.bufferLock = threading.Lock()
-
-    def getFrame(self):
-        img = None
-        self.bufferLock.acquire()
-        if self.bufferFrame is not None:
-            img = np.copy(self.bufferFrame)
-            self.bufferFrame = None
-        self.bufferLock.release()
-        return img
-
-    def start(self):
-        self.thread = threading.Thread(target=self.decoder)
-        self.thread.start()
-        print("PushDecoder start")
-
-    def decoder(self):
-        import av
-        try:
-            video = av.open(self.provider, 'r')
-            for frame in video.decode():
-                yuv_frame = frame.to_ndarray()
-                #rgb_frame = cv2.cvtColor(yuv_frame, cv2.COLOR_YUV2BGR_I420)
-                #rgb_frame = cv2.cvtColor(yuv_frame, cv2.COLOR_YUV2BGR_YV12)
-                #rgb_frame = np.rot90(rgb_frame, k=1)
-                # rgb_frame = cv2.cvtColor(yuv_frame, cv2.COLOR_YUV420sp2BGR)
-                # rgb_frame = np.rot90(rgb_frame, k=1)
-                #rgb_frame = np.fliplr(rgb_frame)
-                rgb_frame = self.mobile_handler(yuv_frame)
-                self.bufferLock.acquire()
-                self.bufferFrame = np.copy(rgb_frame)
-                self.bufferLock.release()
-        except AbortThread:
-            pass
-        except Exception as e:
-            pass
-
-    def mobile_handler(self,yuv_frame):
-        rgb_frame = cv2.cvtColor(yuv_frame, cv2.COLOR_YUV2BGR_YV12)
-        rgb_frame = np.rot90(rgb_frame, k=1)
-        rgb_frame = np.fliplr(rgb_frame)
-        return rgb_frame
-
-    def stop(self):
-        self.provider.close()
-        self.thread.join()
-        print("PushDecoder stop")
+        nvc.release()
