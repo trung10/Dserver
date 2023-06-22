@@ -9,7 +9,8 @@ if __name__ == '__main__':
     width = 640
     height = 480
 
-    nvc.init(width,height)
+    encoder = nvc.VideoEncoder(640, 480)
+    decoder = nvc.VideoDecoder()
 
     n=0
     while True:
@@ -22,10 +23,10 @@ if __name__ == '__main__':
         cv2.imshow('src', frame_src)
 
         bgra_frame = cv2.cvtColor(frame_src, cv2.COLOR_BGR2BGRA )
-        nalu_arr = nvc.encode(bgra_frame)
+        nalu_arr = encoder.encode(bgra_frame)
 
         for nalu in nalu_arr:
-            yuv_frames = nvc.decode(nalu)
+            yuv_frames = decoder.decode(nalu)
             for yuv_bytes in yuv_frames:
 
                 yuv_np = np.frombuffer(yuv_bytes, dtype=np.uint8)
